@@ -18,6 +18,7 @@ package com.android.settings.biometrics.face;
 
 import android.app.settings.SettingsEnums;
 import android.content.Context;
+import android.content.pm.ActivityInfo;
 import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
@@ -34,10 +35,11 @@ import android.util.Log;
 import android.util.Size;
 import android.util.TypedValue;
 import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
 import android.widget.ImageView;
-
 import com.android.settings.R;
 import com.android.settings.biometrics.BiometricEnrollSidecar;
 import com.android.settings.core.InstrumentedPreferenceFragment;
@@ -53,6 +55,8 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
 
     private static final String TAG = "FaceEnrollPreviewFragment";
 
+    private static final long PREVIEW_REVEAL_FALLBACK_MS = 600;
+
     private static final int MAX_PREVIEW_WIDTH = 1920;
     private static final int MAX_PREVIEW_HEIGHT = 1080;
 
@@ -65,7 +69,14 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
     private CaptureRequest mPreviewRequest;
     private Size mPreviewSize;
     private ParticleCollection.Listener mListener;
-
+    private boolean mHalOwnsCamera;
+    private Surface mPreviewSurface;
+    private FaceSquareFrameLayout mPreviewContainer;
+    private SurfaceView mSurfaceView;
+    private Runnable mSurfaceReadyListener;
+    private boolean mPreviewRevealed;
+    private boolean mRevealRequested;
+    private final Runnable mRevealSurfaceRunnable = this::revealSurface;
     // View used to contain the circular cutout and enrollment animation drawable
     private ImageView mCircleView;
 
@@ -81,6 +92,22 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
         @Override
         public void onEnrolled() {
             mListener.onEnrolled();
+        }
+    };
+    private final SurfaceHolder.Callback mSurfaceHolderCallback = new SurfaceHolder.Callback() {
+        @Override
+        public void surfaceCreated(SurfaceHolder holder) {
+            mPreviewSurface = holder.getSurface();
+            notifySurfaceReady();
+        }
+
+        @Override
+        public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        }
+
+        @Override
+        public void surfaceDestroyed(SurfaceHolder holder) {
+            mPreviewSurface = null;
         }
     };
 
@@ -187,7 +214,10 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mHalOwnsCamera = getResources().getBoolean(R.bool.config_face_enroll_hal_owns_camera);
+        mPreviewContainer = getActivity().findViewById(R.id.preview_container);
         mTextureView = getActivity().findViewById(R.id.texture_view);
+        mSurfaceView = getActivity().findViewById(R.id.surface_view);
         mCircleView = getActivity().findViewById(R.id.circle_view);
 
         // Must disable hardware acceleration for this view, otherwise transparency breaks
@@ -197,11 +227,56 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
         mCircleView.setImageDrawable(mAnimationDrawable);
 
         mCameraManager = (CameraManager) getContext().getSystemService(Context.CAMERA_SERVICE);
+
+        if (mHalOwnsCamera) {
+            // The face HAL keeps rendering into the initial preview surface, which is gone once
+            // the activity is recreated. Unlike portrait, locked is respected on large screens.
+            getActivity().setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
+
+            // The HAL renders into a SurfaceView buffer.
+            mTextureView.setVisibility(View.GONE);
+
+            configureHalPreviewSurface();
+
+            if (mRevealRequested) {
+                revealSurface();
+            } else {
+                // The preview surface is a separate, opaque layer that is not affected by the
+                // page's enter animation, so creating it early briefly reveals an unmasked square
+                // through the still-fading page. Keep it hidden until the page has settled.
+                mSurfaceView.postDelayed(mRevealSurfaceRunnable, PREVIEW_REVEAL_FALLBACK_MS);
+            }
+            return;
+        }
+    }
+
+    public void revealSurface() {
+        mRevealRequested = true;
+        if (!mHalOwnsCamera || mSurfaceView == null || mPreviewRevealed) {
+            return;
+        }
+        mSurfaceView.removeCallbacks(mRevealSurfaceRunnable);
+        mPreviewRevealed = true;
+        mSurfaceView.setVisibility(View.VISIBLE);
     }
 
     @Override
     public void onResume() {
         super.onResume();
+
+        if (mHalOwnsCamera) {
+            if (!mPreviewRevealed) {
+                mSurfaceView.removeCallbacks(mRevealSurfaceRunnable);
+                mSurfaceView.postDelayed(mRevealSurfaceRunnable, PREVIEW_REVEAL_FALLBACK_MS);
+            }
+            final SurfaceHolder holder = mSurfaceView.getHolder();
+            holder.addCallback(mSurfaceHolderCallback);
+            if (holder.getSurface() != null && holder.getSurface().isValid()) {
+                mPreviewSurface = holder.getSurface();
+                notifySurfaceReady();
+            }
+            return;
+        }
 
         // When the screen is turned off and turned back on, the SurfaceTexture is already
         // available, and "onSurfaceTextureAvailable" will not be called. In that case, we can open
@@ -217,9 +292,112 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
     @Override
     public void onPause() {
         super.onPause();
-        closeCamera();
+        if (mHalOwnsCamera) {
+            mSurfaceView.removeCallbacks(mRevealSurfaceRunnable);
+            mSurfaceView.getHolder().removeCallback(mSurfaceHolderCallback);
+            mPreviewSurface = null;
+        } else {
+            closeCamera();
+        }
     }
 
+    private void configureHalPreviewSurface() {
+        int previewWidth = getResources().getInteger(R.integer.face_preview_width);
+        int previewHeight = getResources().getInteger(R.integer.face_preview_height);
+        int sensorOrientation = 270;
+
+        if (mCameraManager != null) {
+            try {
+                for (String cameraId : mCameraManager.getCameraIdList()) {
+                    final CameraCharacteristics characteristics =
+                            mCameraManager.getCameraCharacteristics(cameraId);
+                    final Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+                    if (facing == null || facing != CameraCharacteristics.LENS_FACING_FRONT) {
+                        continue;
+                    }
+                    final Integer orientation = characteristics.get(
+                            CameraCharacteristics.SENSOR_ORIENTATION);
+                    if (orientation != null) {
+                        sensorOrientation = orientation;
+                    }
+                    final StreamConfigurationMap map = characteristics.get(
+                            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                    if (map != null) {
+                        final Size[] sizes = map.getOutputSizes(SurfaceHolder.class);
+                        final Size resolved = resolveHalPreviewSize(
+                                sizes, previewWidth, previewHeight);
+                        if (resolved != null) {
+                            previewWidth = resolved.getWidth();
+                            previewHeight = resolved.getHeight();
+                        }
+                    }
+                    break;
+                }
+            } catch (CameraAccessException e) {
+                Log.w(TAG, "Unable to query front camera preview sizes", e);
+            }
+        }
+
+        mSurfaceView.getHolder().setFixedSize(previewWidth, previewHeight);
+        if (mPreviewContainer != null) {
+            final int displayRotation = getDisplayRotationDegrees();
+            final int totalRotation = (sensorOrientation + displayRotation) % 360;
+            final boolean swapDimensions = (totalRotation == 90 || totalRotation == 270);
+            mPreviewContainer.setSurfaceAspectRatio(
+                    swapDimensions ? previewHeight : previewWidth,
+                    swapDimensions ? previewWidth : previewHeight);
+        }
+    }
+
+    private Size resolveHalPreviewSize(Size[] choices, int targetWidth, int targetHeight) {
+        if (choices == null || choices.length == 0) {
+            return null;
+        }
+        for (Size size : choices) {
+            if (size.getWidth() == targetWidth && size.getHeight() == targetHeight) {
+                return size;
+            }
+        }
+        // Stock OPlus face HAL opens an AImageReader at 640x480 (4:3) alongside the preview
+        // Surface; prefer a supported 4:3 SurfaceHolder size within 1920x1080 if the configured
+        // size is not advertised by the camera HAL.
+        Size bestFourThree = null;
+        for (Size size : choices) {
+            final int w = size.getWidth();
+            final int h = size.getHeight();
+            if (w <= MAX_PREVIEW_WIDTH && h <= MAX_PREVIEW_HEIGHT && w * 3 == h * 4) {
+                if (bestFourThree == null || w > bestFourThree.getWidth()) {
+                    bestFourThree = size;
+                }
+            }
+        }
+        if (bestFourThree != null) {
+            Log.i(TAG, "Configured HAL preview size " + targetWidth + "x" + targetHeight
+                    + " unsupported; using " + bestFourThree);
+            return bestFourThree;
+        }
+        final Size fallback = chooseOptimalSize(choices);
+        Log.i(TAG, "Configured HAL preview size " + targetWidth + "x" + targetHeight
+                + " unsupported; falling back to " + fallback);
+        return fallback;
+    }
+
+    private int getDisplayRotationDegrees() {
+        if (getActivity() == null || getActivity().getDisplay() == null) {
+            return 0;
+        }
+        switch (getActivity().getDisplay().getRotation()) {
+            case Surface.ROTATION_90:
+                return 90;
+            case Surface.ROTATION_180:
+                return 180;
+            case Surface.ROTATION_270:
+                return 270;
+            case Surface.ROTATION_0:
+            default:
+                return 0;
+        }
+    }
     @Override
     public void onEnrollmentError(int errMsgId, CharSequence errString) {
         mAnimationDrawable.onEnrollmentError(errMsgId, errString);
@@ -239,6 +417,22 @@ public class FaceEnrollPreviewFragment extends InstrumentedPreferenceFragment
         mListener = listener;
     }
 
+    public void setSurfaceReadyListener(Runnable listener) {
+        mSurfaceReadyListener = listener;
+        notifySurfaceReady();
+    }
+
+    public Surface getPreviewSurface() {
+        return mPreviewSurface;
+    }
+
+    private void notifySurfaceReady() {
+        if (mPreviewSurface != null && mSurfaceReadyListener != null) {
+            final Runnable listener = mSurfaceReadyListener;
+            mSurfaceReadyListener = null;
+            listener.run();
+        }
+    }
     /**
      * Sets up member variables related to camera.
      */

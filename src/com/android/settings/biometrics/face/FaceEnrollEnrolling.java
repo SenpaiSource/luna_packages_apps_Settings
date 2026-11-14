@@ -63,7 +63,6 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
             FaceEnrollEnrolling.this.launchFinish(mToken);
         }
     };
-
     public static class FaceErrorDialog extends BiometricErrorDialog {
         static FaceErrorDialog newInstance(CharSequence msg, int msgId) {
             FaceErrorDialog dialog = new FaceErrorDialog();
@@ -116,10 +115,11 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
         if (!getIntent().getBooleanExtra(BiometricEnrollBase.EXTRA_KEY_REQUIRE_DIVERSITY, true)) {
             mDisabledFeatures.add(FEATURE_REQUIRE_REQUIRE_DIVERSITY);
         }
-        if (!getIntent().getBooleanExtra(BiometricEnrollBase.EXTRA_KEY_REQUIRE_VISION, true)) {
+        if (!getResources().getBoolean(R.bool.config_face_attention_supported)
+                || !getIntent().getBooleanExtra(BiometricEnrollBase.EXTRA_KEY_REQUIRE_VISION,
+                        true)) {
             mDisabledFeatures.add(FEATURE_REQUIRE_ATTENTION);
         }
-
         startEnrollment();
     }
 
@@ -137,6 +137,14 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
     }
 
     @Override
+    public void onEnterAnimationComplete() {
+        super.onEnterAnimationComplete();
+        if (mPreviewFragment != null) {
+            mPreviewFragment.revealSurface();
+        }
+    }
+
+    @Override
     protected boolean shouldFinishWhenBackgrounded() {
         // Prevent super.onStop() from finishing, since we handle this in our onStop().
         return false;
@@ -144,7 +152,6 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
 
     @Override
     protected void startEnrollmentInternal() {
-        super.startEnrollmentInternal();
         mPreviewFragment = (FaceEnrollPreviewFragment) getSupportFragmentManager()
                 .findFragmentByTag(TAG_FACE_PREVIEW);
         if (mPreviewFragment == null) {
@@ -153,8 +160,13 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
                     .commitAllowingStateLoss();
         }
         mPreviewFragment.setListener(mListener);
+        if (getResources().getBoolean(R.bool.config_face_enroll_hal_owns_camera)) {
+            // The face HAL renders into the preview surface, wait until it is available.
+            mPreviewFragment.setSurfaceReadyListener(super::startEnrollmentInternal);
+        } else {
+            super.startEnrollmentInternal();
+        }
     }
-
     @Override
     protected Intent getFinishIntent() {
         return new Intent(this, FaceEnrollFinish.class);
@@ -166,8 +178,8 @@ public class FaceEnrollEnrolling extends BiometricsEnrollEnrolling {
         for (int i = 0; i < mDisabledFeatures.size(); i++) {
             disabledFeatures[i] = mDisabledFeatures.get(i);
         }
-
-        return new FaceEnrollSidecar(disabledFeatures, getIntent());
+        return new FaceEnrollSidecar(disabledFeatures, getIntent(),
+                mPreviewFragment != null ? mPreviewFragment.getPreviewSurface() : null);
     }
 
     @Override

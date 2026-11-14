@@ -372,7 +372,9 @@ public class FaceSettings extends DashboardFragment {
                 startActivityForResult(intent, CHOOSE_LOCK_GENERIC_REQUEST);
             }
         } else {
-            mAttentionController.setToken(mToken);
+            if (mFaceFeatureProvider.isAttentionSupported(getContext())) {
+                mAttentionController.setToken(mToken);
+            }
             mEnrollController.setToken(mToken);
         }
 
@@ -476,7 +478,9 @@ public class FaceSettings extends DashboardFragment {
                 mSensorId = sensorId;
                 mChallenge = challenge;
                 BiometricUtils.removeGatekeeperPasswordHandle(getPrefContext(), data);
-                mAttentionController.setToken(mToken);
+                if (mFaceFeatureProvider.isAttentionSupported(getContext())) {
+                    mAttentionController.setToken(mToken);
+                }
                 mEnrollController.setToken(mToken);
                 mConfirmingPassword = false;
             });

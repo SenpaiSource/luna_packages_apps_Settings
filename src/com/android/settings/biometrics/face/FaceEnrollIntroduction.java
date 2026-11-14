@@ -167,7 +167,8 @@ public class FaceEnrollIntroduction extends BiometricEnrollIntroduction {
         scrollView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
 
         // Set up and show the "require eyes" info section if necessary.
-        if (getResources().getBoolean(R.bool.config_face_intro_show_require_eyes)) {
+        if (getResources().getBoolean(R.bool.config_face_intro_show_require_eyes)
+                && getResources().getBoolean(R.bool.config_face_attention_supported)) {
             final LinearLayout infoRowRequireEyes = findViewById(R.id.info_row_require_eyes);
             final ImageView iconRequireEyes = findViewById(R.id.icon_require_eyes);
             final TextView infoMessageRequireEyes = findViewById(R.id.info_message_require_eyes);

@@ -18,6 +18,8 @@ package com.android.settings.biometrics.face;
 
 import android.content.Context;
 import android.util.AttributeSet;
+import android.view.SurfaceView;
+import android.view.View;
 import android.widget.FrameLayout;
 
 /**
@@ -25,6 +27,8 @@ import android.widget.FrameLayout;
  */
 public class FaceSquareFrameLayout extends FrameLayout {
 
+    private int mSurfaceAspectWidth;
+    private int mSurfaceAspectHeight;
     public FaceSquareFrameLayout(Context context) {
         super(context);
     }
@@ -42,6 +46,16 @@ public class FaceSquareFrameLayout extends FrameLayout {
         super(context, attrs, defStyleAttr, defStyleRes);
     }
 
+    public void setSurfaceAspectRatio(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        if (mSurfaceAspectWidth != width || mSurfaceAspectHeight != height) {
+            mSurfaceAspectWidth = width;
+            mSurfaceAspectHeight = height;
+            requestLayout();
+        }
+    }
     @Override
     public void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         // Don't call super, manually set their size below
@@ -50,11 +64,32 @@ public class FaceSquareFrameLayout extends FrameLayout {
         // Set this frame layout to be a square
         setMeasuredDimension(size, size);
 
-        // Set the children to be the same size (square) as well
+        // Set the children to be the same size (square) as well, except SurfaceView when
+        // a non-square HAL preview aspect ratio is configured so it center-crops cleanly.
         final int numChildren = getChildCount();
         for (int i = 0; i < numChildren; i++) {
-            int spec = MeasureSpec.makeMeasureSpec(size, MeasureSpec.EXACTLY);
-            this.getChildAt(i).measure(spec, spec);
+            final View child = this.getChildAt(i);
+            if (child instanceof SurfaceView
+                    && mSurfaceAspectWidth > 0 && mSurfaceAspectHeight > 0
+                    && mSurfaceAspectWidth != mSurfaceAspectHeight) {
+                final int childWidth;
+                final int childHeight;
+                if (mSurfaceAspectWidth < mSurfaceAspectHeight) {
+                    childWidth = size;
+                    childHeight = Math.round((float) size * mSurfaceAspectHeight
+                            / mSurfaceAspectWidth);
+                } else {
+                    childHeight = size;
+                    childWidth = Math.round((float) size * mSurfaceAspectWidth
+                            / mSurfaceAspectHeight);
+                }
+                child.measure(
+                        MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(childHeight, MeasureSpec.EXACTLY));
+            } else {
+                int spec = MeasureSpec.makeMeasureSpec(size, MeasureSpec.EXACTLY);
+                child.measure(spec, spec);
+            }
         }
     }
 }

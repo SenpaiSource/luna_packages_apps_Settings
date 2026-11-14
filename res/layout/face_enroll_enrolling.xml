@@ -38,14 +38,24 @@
             android:orientation="vertical">
 
             <com.android.settings.biometrics.face.FaceSquareFrameLayout
+                android:id="@+id/preview_container"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:layout_weight="1">
+                android:layout_weight="1"
+                android:clipChildren="true">
 
                 <com.android.settings.biometrics.face.FaceSquareTextureView
                     android:id="@+id/texture_view"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:contentDescription="@null" />
+
+                <SurfaceView
+                    android:id="@+id/surface_view"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:visibility="gone"
                     android:contentDescription="@null" />
 
                 <ImageView
